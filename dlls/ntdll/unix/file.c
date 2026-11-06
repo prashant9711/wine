@@ -5124,6 +5124,86 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
             status = get_nt_and_unix_names( &attr, &nt_name, &unix_name, FILE_OPEN_IF, TRUE );
             if (status == STATUS_SUCCESS || status == STATUS_NO_SUCH_FILE)
             {
+                /* Preserve ASCII casing when renaming the same directory entry.
+                 * Leave aliases, hard links and unrelated destinations alone. */
+                char *source_name = NULL;
+
+                if (status == STATUS_SUCCESS &&
+                    !server_get_unix_name( handle, &source_name ))
+                {
+                    char *resolved_name = unix_name ? realpath( unix_name, NULL ) : NULL;
+
+                    if (source_name && resolved_name &&
+                        !strcmp( source_name, resolved_name ))
+                    {
+                        const WCHAR *requested = name_str.Buffer;
+                        unsigned int length = name_str.Length / sizeof(WCHAR);
+                        const char *basename = strrchr( unix_name, '/' );
+                        char *new_name;
+                        unsigned int i;
+                        size_t prefix;
+                        BOOL match = TRUE, different = FALSE;
+
+                        basename = basename ? basename + 1 : unix_name;
+                        prefix = basename - unix_name;
+
+                        {
+                            unsigned int offset = 0;
+
+                            for (i = 0; i < length; i++)
+                                if (requested[i] == '\\' || requested[i] == '/')
+                                    offset = i + 1;
+
+                            requested += offset;
+                            length -= offset;
+                        }
+
+                        {
+                            size_t basename_len = strlen( basename );
+                            WCHAR *basenameW = malloc( (basename_len + 1) * sizeof(WCHAR) );
+                            char converted[MAX_DIR_ENTRY_LEN * 3 + 1];
+                            DWORD converted_len = 0;
+                            int bytes = -1;
+
+                            if (basenameW)
+                            {
+                                converted_len = ntdll_umbstowcs(
+                                    basename, basename_len, basenameW, basename_len + 1 );
+
+                                match = converted_len == length &&
+                                        !wcsnicmp( requested, basenameW, length );
+
+                                if (match)
+                                {
+                                    bytes = ntdll_wcstoumbs(
+                                        requested, length, converted,
+                                        sizeof(converted) - 1, TRUE );
+
+                                    if (bytes < 0) match = FALSE;
+                                    else
+                                    {
+                                        converted[bytes] = 0;
+                                        different = strcmp( basename, converted ) != 0;
+                                    }
+                                }
+                                free( basenameW );
+                            }
+                            else match = FALSE;
+
+                            if (match && different &&
+                                (new_name = malloc( prefix + bytes + 1 )))
+                            {
+                                memcpy( new_name, unix_name, prefix );
+                                memcpy( new_name + prefix, converted, bytes + 1 );
+                                free( unix_name );
+                                unix_name = new_name;
+                            }
+                        }
+                    }
+                    free( resolved_name );
+                    free( source_name );
+                }
+
                 SERVER_START_REQ( set_fd_name_info )
                 {
                     req->handle   = wine_server_obj_handle( handle );
