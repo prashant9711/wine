@@ -5134,7 +5134,8 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                     char *resolved_name = unix_name ? realpath( unix_name, NULL ) : NULL;
 
                     if (source_name && resolved_name &&
-                        !strcmp( source_name, resolved_name ))
+                        (!strcmp( source_name, resolved_name ) ||
+                         (flags & FILE_RENAME_REPLACE_IF_EXISTS)))
                     {
                         const WCHAR *requested = name_str.Buffer;
                         unsigned int length = name_str.Length / sizeof(WCHAR);
