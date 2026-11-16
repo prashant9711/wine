@@ -1688,6 +1688,148 @@ static void delete_object( WCHAR *path )
     }
 }
 
+
+
+static void test_replacement_filename_casing(void)
+{
+    static const struct
+    {
+        const WCHAR *existing;
+        const WCHAR *requested;
+    } cases[] =
+    {
+        {L"TARGET.txt", L"target.txt"},
+        {L"CAF\u00c9.txt", L"caf\u00e9.txt"},
+        {L"\u0394\u039f\u039a\u0399\u039c\u0397.txt",
+         L"\u03b4\u03bf\u03ba\u03b9\u03bc\u03b7.txt"}
+    };
+
+    static const char source_data[] = "SOURCE_DATA_123";
+    static const char old_data[] = "OLD_DESTINATION";
+
+    WCHAR directory[MAX_PATH], source[MAX_PATH];
+    WCHAR existing[MAX_PATH], requested[MAX_PATH], pattern[MAX_PATH];
+    WIN32_FIND_DATAW data;
+    HANDLE file, search;
+    DWORD written, read;
+    char buffer[64];
+    unsigned int i, count;
+    BOOL ret;
+
+    if (!GetTempPathW(MAX_PATH, directory)) return;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++)
+    {
+        WCHAR temp_file[MAX_PATH];
+
+        if (!GetTempFileNameW(directory, L"ucr", 0, temp_file))
+        {
+            ok(0, "GetTempFileNameW failed\n");
+            continue;
+        }
+
+        DeleteFileW(temp_file);
+
+        ret = CreateDirectoryW(temp_file, NULL);
+        ok(ret, "CreateDirectoryW failed: %lu\n", GetLastError());
+        if (!ret) continue;
+
+        lstrcpyW(directory, temp_file);
+        lstrcatW(directory, L"\\");
+
+        lstrcpyW(source, directory);
+        lstrcatW(source, L"source.txt");
+
+        lstrcpyW(existing, directory);
+        lstrcatW(existing, cases[i].existing);
+
+        lstrcpyW(requested, directory);
+        lstrcatW(requested, cases[i].requested);
+
+        file = CreateFileW(source, GENERIC_WRITE, 0, NULL,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "CreateFileW(source) failed\n");
+        if (file == INVALID_HANDLE_VALUE) goto cleanup;
+
+        ret = WriteFile(file, source_data, sizeof(source_data) - 1,
+                        &written, NULL);
+        ok(ret && written == sizeof(source_data) - 1,
+           "WriteFile(source) failed\n");
+        CloseHandle(file);
+
+        file = CreateFileW(existing, GENERIC_WRITE, 0, NULL,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "CreateFileW(destination) failed\n");
+        if (file == INVALID_HANDLE_VALUE) goto cleanup;
+
+        ret = WriteFile(file, old_data, sizeof(old_data) - 1,
+                        &written, NULL);
+        ok(ret && written == sizeof(old_data) - 1,
+           "WriteFile(destination) failed\n");
+        CloseHandle(file);
+
+        ret = MoveFileExW(source, requested, MOVEFILE_REPLACE_EXISTING);
+        ok(ret, "MoveFileExW failed: %lu\n", GetLastError());
+
+        if (ret)
+        {
+            ok(GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES,
+               "Source file still exists\n");
+
+            file = CreateFileW(requested, GENERIC_READ,
+                               FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            ok(file != INVALID_HANDLE_VALUE,
+               "Could not open replacement\n");
+
+            if (file != INVALID_HANDLE_VALUE)
+            {
+                memset(buffer, 0, sizeof(buffer));
+                ret = ReadFile(file, buffer, sizeof(buffer), &read, NULL);
+                ok(ret && read == sizeof(source_data) - 1 &&
+                   !memcmp(buffer, source_data, sizeof(source_data) - 1),
+                   "Replacement contents incorrect\n");
+                CloseHandle(file);
+            }
+
+            lstrcpyW(pattern, directory);
+            lstrcatW(pattern, L"*");
+
+            search = FindFirstFileW(pattern, &data);
+            count = 0;
+
+            if (search != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (!lstrcmpW(data.cFileName, L".") ||
+                        !lstrcmpW(data.cFileName, L".."))
+                        continue;
+
+                    count++;
+
+                    ok(!lstrcmpW(data.cFileName, cases[i].requested),
+                       "Expected %s, got %s\n",
+                       wine_dbgstr_w(cases[i].requested),
+                       wine_dbgstr_w(data.cFileName));
+
+                } while (FindNextFileW(search, &data));
+
+                FindClose(search);
+            }
+
+            ok(count == 1, "Expected one file, found %u\n", count);
+        }
+
+cleanup:
+        DeleteFileW(source);
+        DeleteFileW(existing);
+        DeleteFileW(requested);
+        RemoveDirectoryW(temp_file);
+
+        GetTempPathW(MAX_PATH, directory);
+    }
+}
+
 static void test_file_rename_information(FILE_INFORMATION_CLASS class)
 {
     static const WCHAR foo_txtW[] = {'\\','f','o','o','.','t','x','t',0};
@@ -7621,6 +7763,7 @@ START_TEST(file)
     test_file_all_name_information();
     test_file_rename_information(FileRenameInformation);
     test_file_rename_information(FileRenameInformationEx);
+    test_replacement_filename_casing();
     test_file_rename_information_ex();
     test_file_link_information(FileLinkInformation);
     test_file_link_information(FileLinkInformationEx);
